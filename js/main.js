@@ -144,4 +144,140 @@ themeButton.hidden = false;
 setupReveal();
 motionQuery.addEventListener("change", setupReveal);
 
-// 3단계에서 GitHub API 요청과 폼 유효성 검사를 추가한다.
+// 3. API 요청 → 프로젝트 상태 → 카드 또는 상태 메시지 렌더링.
+const projectList = document.querySelector("#project-list");
+const projectStatus = document.querySelector("#project-status");
+const retryButton = document.querySelector("#retry-projects");
+const projectState = { status: "idle", repos: [], error: "" };
+
+// 외부 데이터가 HTML로 해석되지 않도록 텍스트를 이스케이프한다.
+const escapeHTML = (value) => String(value).replace(/[&<>"']/g, (character) => ({
+  "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+}[character]));
+
+const renderProjects = () => {
+  const { status, repos, error } = projectState;
+  projectList.setAttribute("aria-busy", String(status === "loading"));
+  retryButton.hidden = status !== "error";
+  retryButton.disabled = status === "loading";
+  projectList.innerHTML = "";
+  projectStatus.hidden = false;
+
+  if (status === "loading") {
+    projectStatus.textContent = "프로젝트를 불러오는 중입니다…";
+  } else if (status === "error") {
+    projectStatus.textContent = error;
+  } else if (repos.length === 0) {
+    projectStatus.textContent = "표시할 프로젝트가 없습니다.";
+  } else {
+    projectStatus.textContent = `${repos.length}개의 공개 프로젝트를 불러왔습니다.`;
+    projectList.innerHTML = repos.map(({ name, description, language, stargazers_count }) => `
+      <article class="project-card">
+        <p class="eyebrow">${escapeHTML(language || "언어 정보 없음")}</p>
+        <h3><a href="https://github.com/bborang/${encodeURIComponent(name)}" target="_blank" rel="noopener noreferrer">${escapeHTML(name)} ↗</a></h3>
+        <p class="project-description">${escapeHTML(description || "등록된 프로젝트 설명이 없습니다.")}</p>
+        <p class="project-meta">GitHub · 스타 ${escapeHTML(stargazers_count ?? 0)}</p>
+      </article>
+    `).join("");
+  }
+};
+
+const loadProjects = async () => {
+  if (projectState.status === "loading") return;
+  projectState.status = "loading";
+  projectState.error = "";
+  renderProjects();
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 15000);
+  try {
+    const response = await fetch("https://api.github.com/users/bborang/repos?sort=updated&per_page=100", {
+      signal: controller.signal,
+      headers: { Accept: "application/vnd.github+json" },
+    });
+    // fetch는 HTTP 403/404에서도 resolve되므로 상태 코드를 직접 확인한다.
+    if (!response.ok) {
+      if (response.status === 403 || response.status === 429) {
+        throw new Error("프로젝트를 불러올 수 없습니다. GitHub 요청이 제한되었습니다. 잠시 후 다시 시도해 주세요.");
+      }
+      throw new Error("프로젝트를 불러올 수 없습니다. 잠시 후 다시 시도해 주세요.");
+    }
+    const repos = await response.json();
+    if (!Array.isArray(repos) || !repos.every((repo) => repo && typeof repo.name === "string")) {
+      throw new Error("프로젝트를 불러올 수 없습니다. 응답 형식을 확인할 수 없습니다.");
+    }
+    projectState.repos = repos;
+    projectState.status = repos.length === 0 ? "empty" : "success";
+  } catch (error) {
+    projectState.repos = [];
+    projectState.status = "error";
+    projectState.error = error.name === "AbortError"
+      ? "프로젝트를 불러올 수 없습니다. 응답 시간이 초과되었습니다. 다시 시도해 주세요."
+      : error.message.startsWith("프로젝트를 불러올 수 없습니다.")
+        ? error.message
+        : "프로젝트를 불러올 수 없습니다. 인터넷 연결을 확인하고 다시 시도해 주세요.";
+  } finally {
+    clearTimeout(timeout);
+    renderProjects();
+  }
+};
+
+retryButton.addEventListener("click", async () => {
+  await loadProjects();
+  // 재시도 버튼이 사라진 뒤에도 키보드 사용자가 결과를 이어서 읽을 수 있다.
+  projectStatus.setAttribute("tabindex", "-1");
+  projectStatus.focus({ preventScroll: true });
+});
+loadProjects();
+
+// 4. 폼 입력 → 유효성 상태 → 필드별 오류와 성공 메시지.
+const contactForm = document.querySelector("#contact-form");
+const formStatus = document.querySelector("#form-status");
+const fields = [...contactForm.querySelectorAll("input, textarea")];
+const formState = { errors: {}, success: false };
+
+const validateField = (field) => {
+  const value = field.value.trim();
+  if (!value) {
+    return { name: "이름을 입력해 주세요.", email: "이메일을 입력해 주세요.", message: "메시지를 입력해 주세요." }[field.name];
+  }
+  if (field.name === "email" && (field.validity.typeMismatch || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value))) {
+    return "올바른 이메일 주소를 입력해 주세요. 예: hello@example.com";
+  }
+  return "";
+};
+
+const renderForm = () => {
+  fields.forEach((field) => {
+    const error = formState.errors[field.name] || "";
+    document.querySelector(`#${field.id}-error`).textContent = error;
+    field.setAttribute("aria-invalid", String(Boolean(error)));
+  });
+  formStatus.textContent = formState.success
+    ? "입력이 정상적으로 확인되었습니다. 실제 메시지는 전송되지 않았습니다. 연락은 이메일을 이용해 주세요."
+    : "";
+};
+
+fields.forEach((field) => {
+  field.addEventListener("input", () => {
+    formState.success = false;
+    // 첫 제출 전에는 입력을 시작한 필드만 검사한다.
+    formState.errors[field.name] = validateField(field);
+    renderForm();
+  });
+});
+
+contactForm.addEventListener("submit", (event) => {
+  event.preventDefault();
+  fields.forEach((field) => {
+    formState.errors[field.name] = validateField(field);
+  });
+  const invalidField = fields.find((field) => formState.errors[field.name]);
+  formState.success = !invalidField;
+  renderForm();
+  if (invalidField) invalidField.focus();
+});
+
+// 이벤트 연결 후 기본 검증 팝업 대신 필드 옆 오류를 사용한다.
+contactForm.noValidate = true;
+contactForm.querySelector('button[type="submit"]').disabled = false;
